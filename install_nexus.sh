@@ -147,7 +147,7 @@ enum AgentCapability {
 class GeminiAPIService: ObservableObject {
     @Published var isProcessing = false
     
-    private var apiKey: String = "AIzaSyBSp2m-F3iD5AYfKAgfF5UTY4C0mqSlOOw"
+    private var apiKey: String = "YOUR_GEMINI_API_KEY"
     private let baseURL = "https://generativelanguage.googleapis.com/v1beta"
     private var model = "gemini-2.5-flash-preview-05-20"
     private var modelFallback = "gemini-2.5-flash-preview-04-17"
