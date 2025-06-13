@@ -1186,7 +1186,7 @@ class BrowserViewModel: ObservableObject {
                 startRecording()
             }
         case "youtube":
-            await self.summarizeYouTube()
+            self.summarizeYouTube()
         default:
             break
         }
@@ -1404,82 +1404,86 @@ class BrowserViewModel: ObservableObject {
 extension BrowserViewModel {
     /// Summarize whichever YouTube video is currently playing or visible.
     @MainActor
-    func summarizeYouTube() async {
-        // 1️⃣  Try simple URL match first
-        if let url = tabManager.activeTab?.url,
-           url.contains("youtube.com/watch") || url.contains("youtube.com/shorts") {
-            await summarizeYouTube(urlString: url)
-            return
-        }
+    func summarizeYouTube() {
+        showAIPanel = true
+        aiResponse = "⏳ Detecting video URL…"
 
-        // 2️⃣  Fallback: ask the page (via JS) for its canonical video URL.
         guard let webView = tabManager.activeTab?.webView else {
             aiResponse = "🎬 No active web view."
-            showAIPanel = true
             return
         }
 
         let js = """
-        (function() {
-            // YouTube sets <link rel="canonical" href="..."> on video pages
-            let canonical = document.querySelector('link[rel=\\'canonical\\']')?.href;
-            if (canonical && (canonical.includes('/watch') || canonical.includes('/shorts'))) {
-                return canonical;
-            }
-            // Shorts sometimes keep the watch URL in <meta property=\\'og:url\\'>
-            let og = document.querySelector('meta[property=\\'og:url\\']')?.content;
-            if (og && (og.includes('/watch') || og.includes('/shorts'))) {
-                return og;
-            }
-            return null;
+        (() => {
+            const live = window.location.href;
+            if (/watch|shorts/.test(live)) return live;
+            const canon = document.querySelector('link[rel="canonical"]')?.href || '';
+            if (/watch|shorts/.test(canon)) return canon;
+            const og = document.querySelector('meta[property="og:url"]')?.content || '';
+            if (/watch|shorts/.test(og)) return og;
+            return '';
         })();
         """
 
-        if let result = try? await webView.evaluateJavaScript(js),
-           let canonical = result as? String,
-           !canonical.isEmpty {
-            await summarizeYouTube(urlString: canonical)
-        } else {
-            aiResponse = "🎬 Please open a YouTube video first."
-            showAIPanel = true
+        webView.evaluateJavaScript(js) { [weak self] result, error in
+            guard let self = self else { return }
+
+            // Determine the URL to summarize
+            let urlString: String
+            if let str = result as? String, !str.isEmpty {
+                urlString = str
+            } else if let live = webView.url?.absoluteString,
+                      live.contains("/watch") || live.contains("/shorts") {
+                urlString = live
+            } else {
+                DispatchQueue.main.async {
+                    self.aiResponse = "🎬 Unable to detect a YouTube video URL."
+                }
+                return
+            }
+
+            // Offload the heavy network call
+            Task.detached(priority: .userInitiated) { [weak self] in
+                guard let self = self else { return }
+                await MainActor.run { self.aiResponse = "⏳ Summarizing video…" }
+                do {
+                    let summary = try await self.geminiService.executeAgentTask(
+                        task: """
+                        Summarize the YouTube video at: \(urlString)
+                        • Fetch transcript
+                        • Provide timestamps and 3-5 key insights
+                        """,
+                        context: "",
+                        capability: .contentExtraction
+                    )
+                    await MainActor.run { self.aiResponse = summary }
+                } catch {
+                    await MainActor.run {
+                        self.aiResponse = "⚠️ Summarization failed: \(error.localizedDescription)"
+                    }
+                }
+            }
         }
     }
 
     /// Summarize a specific YouTube URL (used by right-click).
     @MainActor
     func summarizeYouTube(urlString: String) async {
-                // Always work from the live WKWebView URL first
-        guard let webView = tabManager.activeTab?.webView else {
-            aiResponse = "🎬 No active web view."
-            showAIPanel = true
-            return
-        }
-
-        // 1️⃣ Check the current address-bar URL (most reliable)
-        if let liveURL = webView.url?.absoluteString,
-           liveURL.contains("youtube.com/watch") || liveURL.contains("youtube.com/shorts") {
-            await summarizeYouTube(urlString: liveURL)
-            return
-        }
-
-        // 2️⃣ Fallback: ask the page for its canonical / og:url
-        let js = """
-        (() => {
-            const canonical = document.querySelector('link[rel="canonical"]')?.href;
-            if (canonical && (/\\/watch|\\/shorts/.test(canonical))) return canonical;
-            const og = document.querySelector('meta[property="og:url"]')?.content;
-            if (og && (/\\/watch|\\/shorts/.test(og))) return og;
-            return '';
-        })();
-        """
-
-        if let result = try? await webView.evaluateJavaScript(js),
-           let extracted = result as? String,
-           !extracted.isEmpty {
-            await summarizeYouTube(urlString: extracted)
-        } else {
-            aiResponse = "🎬 Unable to detect a YouTube video on this page."
-            showAIPanel = true
+        showAIPanel = true
+        aiResponse = "⏳ Summarizing video…"
+        do {
+            let summary = try await geminiService.executeAgentTask(
+                task: """
+                Summarize the YouTube video at: \(urlString)
+                • Fetch transcript
+                • Provide timestamps and 3‑5 key insights
+                """,
+                context: "",
+                capability: .contentExtraction
+            )
+            aiResponse = summary
+        } catch {
+            aiResponse = "⚠️ Summarization failed: \(error.localizedDescription)"
         }
     }
 
